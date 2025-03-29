@@ -124,7 +124,7 @@ def init_db():
 def create_lava_invoice(telegram_id):
     url = "https://gate.lava.top/api/v2/invoice"
     headers = {
-        "Authorization": f"Bearer {LAVA_API_KEY}",
+        "Authorization": LAVA_API_KEY,
         "Content-Type": "application/json"
     }
     payload = {
@@ -139,9 +139,16 @@ def create_lava_invoice(telegram_id):
     
     api_logger.debug(f"Creating Lava invoice for user {telegram_id}")
     api_logger.debug(f"Request payload: {json.dumps(payload)}")
+    api_logger.debug(f"Using API key format without Bearer prefix")
     
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))
+        api_logger.debug(f"Response status code: {response.status_code}")
+        
+        if response.status_code == 401:
+            api_logger.error("Authentication failed: Invalid API key or unauthorized access")
+            return None
+            
         response.raise_for_status()
         api_logger.debug(f"Lava API response: {response.text}")
         api_logger.info(f"Successfully created invoice for user {telegram_id}")
