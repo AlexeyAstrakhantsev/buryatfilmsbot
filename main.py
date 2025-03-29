@@ -124,7 +124,7 @@ def init_db():
 def create_lava_invoice(telegram_id):
     url = "https://gate.lava.top/api/v2/invoice"
     headers = {
-        "Authorization": LAVA_API_KEY,
+        "X-Api-Key": LAVA_API_KEY,
         "Content-Type": "application/json"
     }
     payload = {
@@ -139,7 +139,7 @@ def create_lava_invoice(telegram_id):
     
     api_logger.debug(f"Creating Lava invoice for user {telegram_id}")
     api_logger.debug(f"Request payload: {json.dumps(payload)}")
-    api_logger.debug(f"Using API key format without Bearer prefix")
+    api_logger.debug(f"Using X-Api-Key header for authentication")
     
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))

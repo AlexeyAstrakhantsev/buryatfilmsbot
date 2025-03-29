@@ -1,5 +1,45 @@
+# Environment variables
 .env
-database.db
+
+# Database
+subscribers.db
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
 # These are some examples of commonly ignored file patterns.
 # You should customize this list as applicable to your project.
 # Learn more about .gitignore:
@@ -14,9 +54,6 @@ dist/
 
 # Compiled Python bytecode
 *.py[cod]
-
-# Log files
-*.log
 
 # Package files
 *.jar
