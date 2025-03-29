@@ -1,11 +1,38 @@
-meta:
-  environment: python
-  toolchain:
-    name: pip
-    version: 3.8
+name: buryatfilms-bot
+image: python:3.10-slim
+
+env:
+  - name: TELEGRAM_BOT_TOKEN
+    value: ${TELEGRAM_BOT_TOKEN}
+  - name: PRIVATE_CHANNEL_ID
+    value: ${PRIVATE_CHANNEL_ID}
+  - name: LAVA_API_KEY
+    value: ${LAVA_API_KEY}
+  - name: LAVA_OFFER_ID
+    value: ${LAVA_OFFER_ID}
+  - name: WEBHOOK_USERNAME
+    value: ${WEBHOOK_USERNAME}
+  - name: WEBHOOK_PASSWORD
+    value: ${WEBHOOK_PASSWORD}
+  - name: PUBLIC_URL
+    value: ${PUBLIC_URL}
+  - name: ADMIN_TELEGRAM_ID
+    value: ${ADMIN_TELEGRAM_ID}
+  - name: DATABASE
+    value: subscribers.db
+
+volumes:
+  - name: data
+    mount_path: /app/data
+    size: 1Gi
+
 build:
-  requirementsPath: requirements.txt
+  command: pip install -r requirements.txt
+
 run:
-  scriptName: app.py
-  persistenceMount: /data
-  containerPort: 80
+  command: python main.py
+  port: 8000
+
+resources:
+  cpu: 0.2
+  memory: 512Mi
