@@ -16,4 +16,7 @@ cryptography==41.0.3
 
 # Логирование и утилиты
 python-multipart==0.0.6
-colorlog==6.7.0 
+colorlog==6.7.0
+
+# Туннелирование
+pyngrok==6.0.0 

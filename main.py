@@ -13,6 +13,7 @@ import json
 import threading
 import uvicorn
 from webhook_server import app, set_bot_instance
+from pyngrok import ngrok, conf
 
 # Настройка логирования
 def setup_logging():
@@ -294,6 +295,35 @@ def signal_handler(sig, frame):
     logger.info("Program interrupted by user.")
     sys.exit(0)
 
+# Функция для настройки ngrok туннеля
+def setup_ngrok(port):
+    # Проверяем, есть ли NGROK_AUTH_TOKEN в переменных окружения
+    ngrok_auth_token = os.getenv('NGROK_AUTH_TOKEN')
+    if ngrok_auth_token:
+        logger.info("Setting up ngrok with auth token")
+        conf.get_default().auth_token = ngrok_auth_token
+    else:
+        logger.warning("NGROK_AUTH_TOKEN not found. Using ngrok without authentication.")
+    
+    # Запускаем ngrok туннель
+    try:
+        # Закрываем все существующие туннели
+        for tunnel in ngrok.get_tunnels():
+            ngrok.disconnect(tunnel.public_url)
+        
+        # Создаем новый туннель
+        public_url = ngrok.connect(port, "http")
+        logger.info(f"Ngrok tunnel established: {public_url}")
+        
+        # Извлекаем URL для вебхука
+        webhook_url = f"{public_url}/webhook/lava"
+        logger.info(f"Webhook URL: {webhook_url}")
+        
+        return webhook_url
+    except Exception as e:
+        logger.error(f"Error setting up ngrok: {e}")
+        return None
+
 # Основное тело скрипта
 def main():
     logger.info("Starting application")
@@ -311,6 +341,20 @@ def main():
     # Передаем экземпляр бота в FastAPI приложение
     set_bot_instance(bot, PRIVATE_CHANNEL_ID)
     logger.info("Bot instance set for webhook server")
+    
+    # Настройка ngrok для доступа к вебхуку
+    webhook_url = setup_ngrok(8000)
+    if webhook_url:
+        logger.info(f"Please configure your Lava API webhook to: {webhook_url}")
+        # Можно также отправить URL администратору бота
+        admin_id = os.getenv('ADMIN_TELEGRAM_ID')
+        if admin_id:
+            try:
+                bot.send_message(admin_id, f"Бот запущен. URL для вебхука Lava API: {webhook_url}")
+            except Exception as e:
+                logger.error(f"Error sending webhook URL to admin: {e}")
+    else:
+        logger.warning("Failed to set up ngrok tunnel. Webhook will not be accessible from the internet.")
     
     # Запуск FastAPI в отдельном потоке
     webhook_thread = threading.Thread(
