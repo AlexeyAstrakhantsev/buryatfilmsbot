@@ -1,15 +1,62 @@
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import logging
-import sqlite3
+from logging.handlers import RotatingFileHandler
 import os
+import sqlite3
 from dotenv import load_dotenv
 import secrets
+import json
+import traceback
+
+# Настройка логирования
+def setup_webhook_logging():
+    # Создаем директорию для логов, если она не существует
+    log_dir = 'logs'
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # Настройка логгера для вебхуков
+    webhook_logger = logging.getLogger('webhook')
+    webhook_logger.setLevel(logging.DEBUG)
+    
+    # Форматтер для логов
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # Обработчик для файла с ротацией
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, 'webhook.log'), 
+        maxBytes=5*1024*1024,  # 5 МБ
+        backupCount=10
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    
+    # Обработчик для файла с детальными логами
+    debug_handler = RotatingFileHandler(
+        os.path.join(log_dir, 'webhook_debug.log'), 
+        maxBytes=5*1024*1024,  # 5 МБ
+        backupCount=5
+    )
+    debug_handler.setLevel(logging.DEBUG)
+    debug_handler.setFormatter(formatter)
+    
+    # Добавляем обработчики к логгеру
+    webhook_logger.addHandler(file_handler)
+    webhook_logger.addHandler(debug_handler)
+    
+    return webhook_logger
+
+# Инициализация логгера
+webhook_logger = setup_webhook_logging()
 
 # Загрузка переменных окружения
 load_dotenv()
 WEBHOOK_USERNAME = os.getenv('WEBHOOK_USERNAME')
 WEBHOOK_PASSWORD = os.getenv('WEBHOOK_PASSWORD')
+
+if not WEBHOOK_USERNAME or not WEBHOOK_PASSWORD:
+    webhook_logger.warning("Webhook authentication credentials not set")
 
 app = FastAPI()
 security = HTTPBasic()
@@ -23,11 +70,13 @@ def set_bot_instance(bot, channel):
     global bot_instance, channel_id
     bot_instance = bot
     channel_id = channel
+    webhook_logger.info(f"Bot instance set with channel ID: {channel}")
 
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     """Проверка Basic авторизации"""
     if not WEBHOOK_USERNAME or not WEBHOOK_PASSWORD:
+        webhook_logger.error("Server authentication not configured")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Server authentication not configured"
@@ -37,11 +86,13 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     correct_password = secrets.compare_digest(credentials.password, WEBHOOK_PASSWORD)
     
     if not (correct_username and correct_password):
+        webhook_logger.warning(f"Authentication failed. Username: {credentials.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Basic"},
         )
+    webhook_logger.debug("Authentication successful")
     return True
 
 
@@ -51,10 +102,16 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
     global bot_instance, channel_id
     
     if not bot_instance or not channel_id:
+        webhook_logger.error("Bot instance not initialized")
         return {"status": "error", "message": "Bot instance not initialized"}
     
-    data = await request.json()
-    logging.info(f"Received webhook data: {data}")
+    # Получаем данные запроса
+    try:
+        data = await request.json()
+        webhook_logger.info(f"Received webhook data: {json.dumps(data)}")
+    except Exception as e:
+        webhook_logger.error(f"Error parsing webhook data: {e}")
+        return {"status": "error", "message": "Invalid JSON data"}
     
     try:
         event_type = data.get('eventType')
@@ -62,16 +119,23 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
         contract_id = data.get('contractId')
         buyer_email = data.get('buyer', {}).get('email', '')
         
+        webhook_logger.info(f"Processing webhook: event_type={event_type}, status={status}, contract_id={contract_id}")
+        
         # Извлекаем telegram_id из email (который содержит @t.me/ID)
         telegram_id = None
         if '@t.me/' in buyer_email:
             telegram_id = buyer_email.split('@t.me/')[1]
+            webhook_logger.info(f"Extracted telegram_id: {telegram_id} from email: {buyer_email}")
+        else:
+            webhook_logger.warning(f"Could not extract telegram_id from email: {buyer_email}")
         
         # Обработка успешного платежа или продления подписки
         if status == 'subscription-active' and (
             event_type == 'payment.success' or 
             event_type == 'subscription.recurring.payment.success'
         ):
+            webhook_logger.info(f"Processing successful payment for user {telegram_id}")
+            
             # Обновляем статус платежа в базе данных
             conn = sqlite3.connect('subscribers.db')
             cursor = conn.cursor()
@@ -85,6 +149,7 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
                 user_exists = cursor.fetchone()
                 
                 if user_exists:
+                    webhook_logger.debug(f"Updating existing user {telegram_id} in database")
                     # Обновляем существующего пользователя
                     cursor.execute(
                         "UPDATE subscribers SET payment_id = ?, status = 'active', "
@@ -92,6 +157,7 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
                         (contract_id, telegram_id)
                     )
                 else:
+                    webhook_logger.debug(f"Creating new user {telegram_id} in database")
                     # Создаем нового пользователя
                     cursor.execute(
                         "INSERT INTO subscribers (telegram_id, payment_id, status, expiry_date) "
@@ -103,6 +169,7 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
                 
                 # Отправляем пользователю ссылку на канал
                 try:
+                    webhook_logger.debug(f"Creating invite link for user {telegram_id}")
                     invite_link = bot_instance.create_chat_invite_link(
                         channel_id, 
                         member_limit=1
@@ -112,12 +179,15 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
                     if event_type == 'subscription.recurring.payment.success':
                         message_text = "Ваша подписка успешно продлена! Вот ссылка для доступа к каналу: " + invite_link
                     
+                    webhook_logger.debug(f"Sending message to user {telegram_id}")
                     bot_instance.send_message(
                         telegram_id,
                         message_text
                     )
+                    webhook_logger.info(f"Successfully sent invite link to user {telegram_id}")
                 except Exception as e:
-                    logging.error(f"Error sending invite link to user {telegram_id}: {e}")
+                    webhook_logger.error(f"Error sending invite link to user {telegram_id}: {e}")
+                    webhook_logger.error(traceback.format_exc())
             
             conn.close()
         
@@ -127,10 +197,12 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
             event_type == 'subscription.recurring.payment.failed'
         ):
             error_message = data.get('errorMessage', 'Неизвестная ошибка')
+            webhook_logger.info(f"Processing failed payment for user {telegram_id}: {error_message}")
             
             if telegram_id:
                 # Если это ошибка продления, нужно обновить статус в базе
                 if event_type == 'subscription.recurring.payment.failed':
+                    webhook_logger.debug(f"Updating status to expired for user {telegram_id}")
                     conn = sqlite3.connect('subscribers.db')
                     cursor = conn.cursor()
                     cursor.execute(
@@ -142,13 +214,17 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
                     
                     # Удаляем пользователя из канала
                     try:
+                        webhook_logger.debug(f"Removing user {telegram_id} from channel")
                         bot_instance.kick_chat_member(channel_id, telegram_id)
                         bot_instance.unban_chat_member(channel_id, telegram_id)
+                        webhook_logger.info(f"Successfully removed user {telegram_id} from channel")
                     except Exception as e:
-                        logging.error(f"Error removing user {telegram_id} from channel: {e}")
+                        webhook_logger.error(f"Error removing user {telegram_id} from channel: {e}")
+                        webhook_logger.error(traceback.format_exc())
                 
                 # Отправляем сообщение о неудачном платеже
                 try:
+                    webhook_logger.debug(f"Sending failure message to user {telegram_id}")
                     message_text = f"Произошла ошибка при оплате: {error_message}. Пожалуйста, попробуйте снова."
                     if event_type == 'subscription.recurring.payment.failed':
                         message_text = f"Не удалось продлить вашу подписку: {error_message}. Ваш доступ к каналу приостановлен. Пожалуйста, оплатите подписку снова."
@@ -157,16 +233,22 @@ async def lava_webhook(request: Request, authenticated: bool = Depends(verify_cr
                         telegram_id,
                         message_text
                     )
+                    webhook_logger.info(f"Successfully sent failure message to user {telegram_id}")
                 except Exception as e:
-                    logging.error(f"Error sending message to user {telegram_id}: {e}")
+                    webhook_logger.error(f"Error sending message to user {telegram_id}: {e}")
+                    webhook_logger.error(traceback.format_exc())
+        else:
+            webhook_logger.warning(f"Unhandled event type or status: {event_type}, {status}")
         
         return {"status": "success"}
     except Exception as e:
-        logging.error(f"Error processing webhook: {e}")
+        webhook_logger.error(f"Error processing webhook: {e}")
+        webhook_logger.error(traceback.format_exc())
         return {"status": "error", "message": str(e)}
 
 
 # Простой эндпоинт для проверки работоспособности сервера
 @app.get("/")
 async def root():
+    webhook_logger.debug("Health check endpoint called")
     return {"status": "Webhook server is running"} 
