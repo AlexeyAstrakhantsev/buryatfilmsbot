@@ -127,11 +127,13 @@ def create_lava_invoice(telegram_id):
         "X-Api-Key": LAVA_API_KEY,
         "Content-Type": "application/json"
     }
+    
+    # Используем точный формат из примера
     payload = {
-        "email": f"@t.me/{telegram_id}",
+        "email": f"{telegram_id}@t.me",  # Формат должен быть TELEGRAM_ID@t.me
         "offerId": LAVA_OFFER_ID,
         "periodicity": "MONTHLY",
-        "currency": "USD",
+        "currency": "RUB",  # Изменено на RUB вместо USD
         "buyerLanguage": "RU",
         "paymentMethod": "BANK131",
         "clientUtm": {}
@@ -142,10 +144,19 @@ def create_lava_invoice(telegram_id):
     api_logger.debug(f"Using X-Api-Key header for authentication")
     
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        response = requests.post(url, headers=headers, json=payload)
         api_logger.debug(f"Response status code: {response.status_code}")
         
-        if response.status_code == 401:
+        if response.status_code == 400:
+            api_logger.error(f"Bad Request: {response.text}")
+            # Попробуем получить детали ошибки
+            try:
+                error_details = response.json()
+                api_logger.error(f"Error details: {json.dumps(error_details)}")
+            except:
+                pass
+            return None
+        elif response.status_code == 401:
             api_logger.error("Authentication failed: Invalid API key or unauthorized access")
             return None
             
