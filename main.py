@@ -15,8 +15,8 @@ import uvicorn
 from webhook_server import app, set_bot_instance
 from pyngrok import ngrok, conf
 
-# Глобальная переменная для хранения туннеля
-lt_tunnel = None
+# Глобальные переменные для хранения процесса localtunnel
+lt_process = None
 
 # Настройка логирования
 def setup_logging():
@@ -297,46 +297,80 @@ def check_expired_subscriptions():
 def signal_handler(sig, frame):
     logger.info("Program interrupted by user.")
     
-    # Закрываем туннель, если он был создан
-    global lt_tunnel
-    if lt_tunnel:
-        logger.info("Closing Localtunnel...")
+    # Закрываем процесс localtunnel, если он был создан
+    global lt_process
+    if lt_process:
+        logger.info("Terminating Localtunnel process...")
         try:
-            lt_tunnel.close()
-            logger.info("Localtunnel closed successfully")
+            lt_process.terminate()
+            lt_process.wait(timeout=5)
+            logger.info("Localtunnel process terminated successfully")
         except Exception as e:
-            logger.error(f"Error closing Localtunnel: {e}")
+            logger.error(f"Error terminating Localtunnel process: {e}")
+            try:
+                lt_process.kill()
+                logger.info("Localtunnel process killed")
+            except:
+                pass
     
     sys.exit(0)
 
-# Для использования Localtunnel через Python-библиотеку
+# Для использования Localtunnel через Node.js
 def setup_localtunnel(port):
     try:
-        import localtunnel.client as localtunnel
+        import subprocess
+        import json
         
         logger.info(f"Setting up Localtunnel for port {port}")
         
         # Получаем поддомен из переменных окружения, если он указан
         subdomain = os.getenv('LOCALTUNNEL_SUBDOMAIN')
         
-        # Создаем туннель
+        # Формируем команду для запуска localtunnel
+        command = ["lt", "--port", str(port)]
         if subdomain:
             logger.debug(f"Using custom subdomain: {subdomain}")
-            tunnel = localtunnel.create_tunnel(port, subdomain=subdomain)
-        else:
-            tunnel = localtunnel.create_tunnel(port)
+            command.extend(["--subdomain", subdomain])
         
-        # Получаем URL туннеля
-        tunnel_url = tunnel.url
-        logger.info(f"Localtunnel established: {tunnel_url}")
-        webhook_url = f"{tunnel_url}/webhook/lava"
-        logger.info(f"Webhook URL: {webhook_url}")
+        logger.debug(f"Running command: {' '.join(command)}")
         
-        # Сохраняем туннель в глобальной переменной, чтобы он не закрылся
-        global lt_tunnel
-        lt_tunnel = tunnel
+        # Запускаем localtunnel
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
         
-        return webhook_url
+        # Сохраняем процесс в глобальной переменной
+        global lt_process
+        lt_process = process
+        
+        # Ждем некоторое время для запуска туннеля
+        import time
+        time.sleep(2)
+        
+        # Читаем вывод для получения URL
+        for i in range(10):  # Пробуем прочитать вывод несколько раз
+            line = process.stdout.readline().strip()
+            logger.debug(f"Localtunnel output: {line}")
+            
+            if "your url is:" in line.lower():
+                tunnel_url = line.split("is:")[1].strip()
+                logger.info(f"Localtunnel established: {tunnel_url}")
+                webhook_url = f"{tunnel_url}/webhook/lava"
+                logger.info(f"Webhook URL: {webhook_url}")
+                return webhook_url
+            
+            time.sleep(0.5)
+        
+        # Проверяем ошибки
+        error = process.stderr.readline().strip()
+        if error:
+            logger.error(f"Localtunnel error: {error}")
+        
+        logger.error("Could not find tunnel URL in output")
+        return None
     except Exception as e:
         logger.error(f"Error setting up Localtunnel: {e}")
         return None
@@ -433,6 +467,21 @@ def update_duckdns(domain, token, ip=None):
         logger.error(f"Error updating DuckDNS: {e}")
         return None
 
+# Проверка наличия localtunnel в системе
+def check_localtunnel_installed():
+    try:
+        import subprocess
+        result = subprocess.run(["which", "lt"], capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"Localtunnel found at: {result.stdout.strip()}")
+            return True
+        else:
+            logger.error("Localtunnel (lt) command not found. Please install it using: npm install -g localtunnel")
+            return False
+    except Exception as e:
+        logger.error(f"Error checking localtunnel installation: {e}")
+        return False
+
 # Основное тело скрипта
 def main():
     logger.info("Starting application")
@@ -451,19 +500,23 @@ def main():
     set_bot_instance(bot, PRIVATE_CHANNEL_ID)
     logger.info("Bot instance set for webhook server")
     
-    # Настройка Localtunnel
-    webhook_url = setup_localtunnel(8000)
-    if webhook_url:
-        logger.info(f"Please configure your Lava API webhook to: {webhook_url}")
-        # Можно также отправить URL администратору бота
-        admin_id = os.getenv('ADMIN_TELEGRAM_ID')
-        if admin_id:
-            try:
-                bot.send_message(admin_id, f"Бот запущен. URL для вебхука Lava API: {webhook_url}")
-            except Exception as e:
-                logger.error(f"Error sending webhook URL to admin: {e}")
+    # Проверяем наличие localtunnel
+    if check_localtunnel_installed():
+        # Настройка Localtunnel
+        webhook_url = setup_localtunnel(8000)
+        if webhook_url:
+            logger.info(f"Please configure your Lava API webhook to: {webhook_url}")
+            # Можно также отправить URL администратору бота
+            admin_id = os.getenv('ADMIN_TELEGRAM_ID')
+            if admin_id:
+                try:
+                    bot.send_message(admin_id, f"Бот запущен. URL для вебхука Lava API: {webhook_url}")
+                except Exception as e:
+                    logger.error(f"Error sending webhook URL to admin: {e}")
+        else:
+            logger.warning("Failed to set up Localtunnel. Webhook will not be accessible from the internet.")
     else:
-        logger.warning("Failed to set up Localtunnel. Webhook will not be accessible from the internet.")
+        logger.warning("Localtunnel not installed. Webhook will not be accessible from the internet.")
     
     # Запуск FastAPI в отдельном потоке
     webhook_thread = threading.Thread(
