@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  bot:
+    build: .
+    restart: always
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    volumes:
+      - ./subscribers.db:/app/subscribers.db
+      - ./logs:/app/logs
+    env_file:
+      - .env 
