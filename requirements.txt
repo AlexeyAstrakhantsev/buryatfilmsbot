@@ -19,4 +19,4 @@ python-multipart==0.0.6
 colorlog==6.7.0
 
 # Туннелирование
-pyngrok==6.0.0 
+localtunnel==2.0.2 

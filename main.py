@@ -15,6 +15,9 @@ import uvicorn
 from webhook_server import app, set_bot_instance
 from pyngrok import ngrok, conf
 
+# Глобальная переменная для хранения туннеля
+lt_tunnel = None
+
 # Настройка логирования
 def setup_logging():
     # Создаем директорию для логов, если она не существует
@@ -293,35 +296,141 @@ def check_expired_subscriptions():
 # Прерывание скрипта пользователем
 def signal_handler(sig, frame):
     logger.info("Program interrupted by user.")
+    
+    # Закрываем туннель, если он был создан
+    global lt_tunnel
+    if lt_tunnel:
+        logger.info("Closing Localtunnel...")
+        try:
+            lt_tunnel.close()
+            logger.info("Localtunnel closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing Localtunnel: {e}")
+    
     sys.exit(0)
 
-# Функция для настройки ngrok туннеля
-def setup_ngrok(port):
-    # Проверяем, есть ли NGROK_AUTH_TOKEN в переменных окружения
-    ngrok_auth_token = os.getenv('NGROK_AUTH_TOKEN')
-    if ngrok_auth_token:
-        logger.info("Setting up ngrok with auth token")
-        conf.get_default().auth_token = ngrok_auth_token
-    else:
-        logger.warning("NGROK_AUTH_TOKEN not found. Using ngrok without authentication.")
-    
-    # Запускаем ngrok туннель
+# Для использования Localtunnel через Python-библиотеку
+def setup_localtunnel(port):
     try:
-        # Закрываем все существующие туннели
-        for tunnel in ngrok.get_tunnels():
-            ngrok.disconnect(tunnel.public_url)
+        import localtunnel.client as localtunnel
         
-        # Создаем новый туннель
-        public_url = ngrok.connect(port, "http")
-        logger.info(f"Ngrok tunnel established: {public_url}")
+        logger.info(f"Setting up Localtunnel for port {port}")
         
-        # Извлекаем URL для вебхука
-        webhook_url = f"{public_url}/webhook/lava"
+        # Получаем поддомен из переменных окружения, если он указан
+        subdomain = os.getenv('LOCALTUNNEL_SUBDOMAIN')
+        
+        # Создаем туннель
+        if subdomain:
+            logger.debug(f"Using custom subdomain: {subdomain}")
+            tunnel = localtunnel.create_tunnel(port, subdomain=subdomain)
+        else:
+            tunnel = localtunnel.create_tunnel(port)
+        
+        # Получаем URL туннеля
+        tunnel_url = tunnel.url
+        logger.info(f"Localtunnel established: {tunnel_url}")
+        webhook_url = f"{tunnel_url}/webhook/lava"
         logger.info(f"Webhook URL: {webhook_url}")
+        
+        # Сохраняем туннель в глобальной переменной, чтобы он не закрылся
+        global lt_tunnel
+        lt_tunnel = tunnel
         
         return webhook_url
     except Exception as e:
-        logger.error(f"Error setting up ngrok: {e}")
+        logger.error(f"Error setting up Localtunnel: {e}")
+        return None
+
+# Для использования Pagekite вместо ngrok
+
+def setup_pagekite(port, kite_name, kite_secret):
+    try:
+        import subprocess
+        
+        logger.info(f"Setting up Pagekite for port {port}")
+        
+        # Запускаем pagekite
+        process = subprocess.Popen(
+            ["python", "-m", "pagekite", str(port), kite_name, "--clean", f"--secret={kite_secret}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Ждем некоторое время для установки туннеля
+        import time
+        time.sleep(5)
+        
+        tunnel_url = f"https://{kite_name}"
+        logger.info(f"Pagekite tunnel established: {tunnel_url}")
+        webhook_url = f"{tunnel_url}/webhook/lava"
+        logger.info(f"Webhook URL: {webhook_url}")
+        return webhook_url
+    except Exception as e:
+        logger.error(f"Error setting up Pagekite: {e}")
+        return None
+
+# Для использования Serveo вместо ngrok
+
+def setup_serveo(port, subdomain=None):
+    try:
+        import subprocess
+        
+        logger.info(f"Setting up Serveo for port {port}")
+        
+        # Формируем команду
+        command = ["ssh", "-R", f"{subdomain}:80:localhost:{port}", "serveo.net"]
+        if not subdomain:
+            command = ["ssh", "-R", f"80:localhost:{port}", "serveo.net"]
+        
+        # Запускаем ssh туннель
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Получаем URL из вывода
+        for line in process.stdout:
+            if "Forwarding" in line:
+                tunnel_url = line.split("to")[1].strip()
+                logger.info(f"Serveo tunnel established: {tunnel_url}")
+                webhook_url = f"{tunnel_url}/webhook/lava"
+                logger.info(f"Webhook URL: {webhook_url}")
+                return webhook_url
+        
+        logger.error("Could not find tunnel URL in output")
+        return None
+    except Exception as e:
+        logger.error(f"Error setting up Serveo: {e}")
+        return None
+
+# Для использования DuckDNS вместо ngrok
+
+def update_duckdns(domain, token, ip=None):
+    try:
+        logger.info(f"Updating DuckDNS for domain {domain}")
+        
+        # Формируем URL для обновления
+        url = f"https://www.duckdns.org/update?domains={domain}&token={token}"
+        if ip:
+            url += f"&ip={ip}"
+        
+        # Отправляем запрос на обновление
+        response = requests.get(url)
+        
+        if response.text.strip() == "OK":
+            logger.info(f"DuckDNS updated successfully")
+            tunnel_url = f"https://{domain}.duckdns.org"
+            webhook_url = f"{tunnel_url}/webhook/lava"
+            logger.info(f"Webhook URL: {webhook_url}")
+            return webhook_url
+        else:
+            logger.error(f"Failed to update DuckDNS: {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Error updating DuckDNS: {e}")
         return None
 
 # Основное тело скрипта
@@ -342,8 +451,8 @@ def main():
     set_bot_instance(bot, PRIVATE_CHANNEL_ID)
     logger.info("Bot instance set for webhook server")
     
-    # Настройка ngrok для доступа к вебхуку
-    webhook_url = setup_ngrok(8000)
+    # Настройка Localtunnel
+    webhook_url = setup_localtunnel(8000)
     if webhook_url:
         logger.info(f"Please configure your Lava API webhook to: {webhook_url}")
         # Можно также отправить URL администратору бота
@@ -354,7 +463,7 @@ def main():
             except Exception as e:
                 logger.error(f"Error sending webhook URL to admin: {e}")
     else:
-        logger.warning("Failed to set up ngrok tunnel. Webhook will not be accessible from the internet.")
+        logger.warning("Failed to set up Localtunnel. Webhook will not be accessible from the internet.")
     
     # Запуск FastAPI в отдельном потоке
     webhook_thread = threading.Thread(
